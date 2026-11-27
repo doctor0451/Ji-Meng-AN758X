@@ -1,0 +1,1085 @@
+name: Build My PonWrt (Airoha AN758x PON)
+
+env:
+  BUILD_ROOT: /workdir
+  SOURCE: ${{ github.event.inputs.source || 'pbs05/ponwrt' }}
+  FW_AUTHOR: ${{ github.event.inputs.fw_author || 'qwe' }}
+  REPO_URL: ${{ github.event.inputs.source == 'fork' && 'https://github.com/qwe-qaq/ponwrt' || 'https://github.com/pbs05/ponwrt' }}
+  FEEDS_CONF: ''
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
+  USE_DL_CACHE: true
+  USE_CCACHE: false
+  CCACHE_MAXSIZE: 2G
+  PREBUILT_HOST: ${{ github.event.inputs.prebuilt_host == 'false' && 'false' || 'true' }}
+  HOST_MODE: ${{ github.event.inputs.prebuilt_host == 'false' && 'source' || 'prebuilt' }}
+  RUST_PIN_FEED: false
+  CACHE_ROOT: /workdir/openwrt
+  CACHE_RELEASE: cache-backup
+  RELEASE_BACKUP: ${{ github.event.inputs.release_backup == 'false' && 'false' || 'true' }}
+  TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
+  SOC: ${{ github.event.inputs.soc || 'an7581' }}
+  PROFILE: ${{ github.event.inputs.profile || 'fiberhome_hg5585f-ct' }}
+  BUILD_SCOPE: ${{ github.event.inputs.scope || 'firmware' }}
+  IGNORE_CACHE: ${{ github.event.inputs.ignore_cache || 'false' }}
+  FW_BUILD_TIME: ''                 # 留空 = 自动取构建时时间（Asia/Shanghai）
+  FW_DESC_SUFFIX: ''               # 留空 = "· qwe · <构建时间>"；填了则完全自定义
+  FW_TS_NAME: 'true'
+  OPT_CRYPTO_ARM64CE: ${{ github.event.inputs.opt_arm64ce == '1' && '1' || '0' }}
+  OPT_CRYPTO_CHACHA:  ${{ github.event.inputs.opt_chacha  == '1' && '1' || '0' }}
+  OPT_CRYPTO_EIP93:   ${{ github.event.inputs.opt_eip93   == '1' && '1' || '0' }}
+  PRIVATE_REPO: ${{ github.event.inputs.private_repo || 'qwe-qaq/openwrt-fttr' }}
+  PRIVATE_REPO_BRANCH: ${{ github.event.inputs.private_repo_branch || 'main' }}
+  FTTR_LUCI_REPO: ${{ github.event.inputs.fttr_luci_repo || 'LazuliKao/luci-app-fttr' }}
+  FTTR_LUCI_BRANCH: ${{ github.event.inputs.fttr_luci_branch || 'main' }}
+  
+  # --- 自定义插件与 Docker 开关 ---
+  INSTALL_PLUGINS: ${{ github.event.inputs.install_plugins || 'true' }}
+  INSTALL_CARBON: ${{ github.event.inputs.install_carbon || 'true' }}
+  DOCKER_KERNEL_ENABLED: ${{ github.event.inputs.docker_kernel || 'true' }}
+  DOCKER_APPS_ENABLED: ${{ github.event.inputs.docker_apps || 'false' }}
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: '编译源码仓库'
+        required: true
+        default: 'pbs05/ponwrt'
+        type: choice
+        options:
+          - fork
+          - pbs05/ponwrt
+      branch:
+        description: 'ponwrt 源码分支（AN4475-G2 用 vendor Wi-Fi 7 驱动时填 wifi7-an4475，并选 source=fork；master 走 mt76 路线）'
+        required: true
+        default: 'master'
+      soc:
+        description: 'SoC 平台'
+        required: true
+        default: 'an7581'
+        type: choice
+        options:
+          - an7581
+          - an7583
+      profile:
+        description: '机型 profile (all=全机型编译)'
+        required: true
+        default: 'fiberhome_an4475-g2'
+        type: choice
+        options:
+          - fiberhome_hg5585f-cu
+          - fiberhome_hg5585f-ct
+          - fiberhome_hg5382a
+          - fiberhome_an4475-g2
+          - gemtek_xg2010g
+          - nokia_xg-040g-md-ubi
+          - nokia_xg-040g-tf-ubi
+          - unionman_ung00a
+          - znxt_zn504xg-d
+          - znxt_zn515xg-d
+          - h3c_hm2004-du
+          - nokia_xg-040g-mf
+          - nokia_xg-040g-mf-ubi
+          - all
+      opt_arm64ce:
+        description: 'arm64 汇编加密实现（AN7581 走 NEON 位切片 / AN7583 走 CE，按 SoC 自动选）'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+      opt_chacha:
+        description: 'ChaCha20-Poly1305 NEON（Xray / sing-box / WireGuard 推荐）。注：机型 configs 里 chacha20 三个包本就默认 =y，此开关主要额外带 gcm/ccm/ctr/xts'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+      opt_eip93:
+        description: 'EIP93 硬件加密引擎（仅大块 IPSec / 大文件 TLS 有收益，小包更慢）'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
+      scope:
+        description: '构建范围 (toolchain-only 仅预热工具链缓存)'
+        required: true
+        default: 'firmware'
+        type: choice
+        options:
+          - firmware
+          - toolchain-only
+      ignore_cache:
+        description: '忽略构建缓存强制重编（跳过一次恢复，仍会存新一代）'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      release_backup:
+        description: 'Release 备份通道（actions/cache 7 天无访问会回收，Release 不会）'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      prebuilt_host:
+        description: 'Go/Rust/LLVM 用 runner 预编译（false = 全部从源码真实编译，首次 +1.5~2.5 小时）'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      fw_author:
+        description: '覆盖固件版本后缀的作者名（LuCI 概览页「固件版本」）。留空 = qwe'
+        required: false
+        default: 'qwe'
+      upload_release:
+        description: '固件发布到 Release（false 则只传 Artifact）'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      private_repo:
+        description: '拉取私有仓库（FTTR 三件套来源，需凭证）'
+        required: false
+        default: 'LazuliKao/openwrt-fttr'
+        type: choice
+        options:
+          - LazuliKao/openwrt-fttr
+          - none
+      private_repo_branch:
+        description: '私有仓库分支'
+        required: false
+        default: 'main'
+      ssh:
+        description: 'SSH connection to Actions (仅 main 分支、仓库所有者可触发)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+          
+      # --- 新增的编译选项 ---
+      install_plugins:
+        description: '安装 plugin.txt 中的插件（默认：是）'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      install_carbon:
+        description: '安装 luci-theme-carbon 主题（默认：是）'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      docker_kernel:
+        description: '启用 Docker 内核支持（默认：是）'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      docker_apps:
+        description: '启用 Docker 用户态软件（默认：否）'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    outputs:
+      cache_prefix: ${{ steps.cache-key.outputs.prefix }}
+      cache_key: ${{ steps.cache-key.outputs.key }}
+    env:
+      HAS_APP_CREDS: ${{ secrets.PRIVATE_SOURCE_APP_ID != '' && secrets.PRIVATE_SOURCE_APP_PRIVATE_KEY != '' }}
+      HAS_PAT: ${{ secrets.PRIVATE_REPO_TOKEN != '' || secrets.FTTR_TOKEN != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Resolve device profile
+        id: resolve
+        run: |
+          PROFILE="${PROFILE}"
+          SOC="${SOC}"
+
+          echo "week=$(date +%Y%W)" >> "$GITHUB_OUTPUT"
+
+          if [ "$PROFILE" = "fiberhome_an4475-g2" ] && [ "${SOURCE}" != "fork" ]; then
+            echo "::warning::AN4475-G2 的板级支持在 qwe-qaq/ponwrt（source=fork），当前 ${SOURCE} 尚无该 profile；请把 source 选为 fork"
+          fi
+
+          WIFI7_VENDOR=false
+          if [ "${REPO_BRANCH}" = "wifi7-an4475" ]; then
+            if [ "${SOURCE}" != "fork" ]; then
+              echo "::error::wifi7-an4475 分支只存在于 qwe-qaq/ponwrt，请把 source 选为 fork"
+              exit 1
+            fi
+            if [ "$PROFILE" = "fiberhome_an4475-g2" ]; then
+              WIFI7_VENDOR=true
+            else
+              echo "::warning::branch=wifi7-an4475 但 profile=${PROFILE}，仍使用 ${PROFILE} 的常规配置（不含 vendor Wi-Fi 7 包）"
+            fi
+          fi
+          echo "WIFI7_VENDOR=${WIFI7_VENDOR}" >> "$GITHUB_ENV"
+
+          if [ "$PROFILE" != "all" ]; then
+            case "$PROFILE" in
+              nokia_xg-040g-mf*) SOC="an7583" ;;
+              *)                  SOC="an7581" ;;
+            esac
+          fi
+
+          echo "SOC=$SOC" >> "$GITHUB_ENV"
+          echo "PROFILE=$PROFILE" >> "$GITHUB_ENV"
+          echo "DEVICE_NAME=ponwrt-${SOC}-${PROFILE}-${HOST_MODE}" >> "$GITHUB_ENV"
+          
+          if [ "$PROFILE" = "all" ]; then
+            echo "CONFIG_FILE=configs/${SOC}.config" >> "$GITHUB_ENV"
+          elif [ "${WIFI7_VENDOR}" = "true" ]; then
+            echo "CONFIG_FILE=configs/fiberhome_an4475-g2-wifi7.config" >> "$GITHUB_ENV"
+            echo "✅ vendor Wi-Fi 7 配置: configs/fiberhome_an4475-g2-wifi7.config"
+          else
+            echo "CONFIG_FILE=configs/${PROFILE}.config" >> "$GITHUB_ENV"
+          fi
+
+          echo "========================================"
+          echo "SoC      : $SOC"
+          echo "Profile  : $PROFILE"
+          echo "Source   : ${SOURCE} (${REPO_URL})"
+          echo "Branch   : ${REPO_BRANCH}"
+          echo "Scope    : ${BUILD_SCOPE}"
+          echo "Author   : ${FW_AUTHOR}"
+          echo "Crypto   : ARM64CE=${OPT_CRYPTO_ARM64CE} CHACHA=${OPT_CRYPTO_CHACHA} EIP93=${OPT_CRYPTO_EIP93}"
+          echo "========================================"
+
+      - name: Free disk space & init build environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/lib/jvm \
+            /usr/local/share/powershell /usr/share/swift 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          sudo -E apt-get -yqq purge firefox snapd 2>/dev/null || true
+
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile && sudo swapon /swapfile
+
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq install build-essential clang llvm dwarves \
+            libssl-dev libelf-dev bc flex bison python3 python3-distutils \
+            xz-utils tar unzip zip zstd dos2unix ccache gettext \
+            rsync file wget curl git subversion 2>/dev/null || true
+
+          if [ -x "$GITHUB_WORKSPACE/scripts/init_build_environment.sh" ]; then
+            bash "$GITHUB_WORKSPACE/scripts/init_build_environment.sh" || true
+          else
+            sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)' || true
+          fi
+
+          sudo -E apt-get -yqq autoremove --purge
+          sudo -E apt-get -yqq clean
+          sudo -E timedatectl set-timezone "$TZ"
+
+          sudo mkdir -p /workdir
+          sudo chown "$USER":"$USER" /workdir
+
+          echo "磁盘空间:"; df -hT
+          echo "内存/Swap:"; free -h
+
+      - name: Clone source code
+        run: |
+          cd "$BUILD_ROOT"
+          df -hT "$PWD"
+          git clone "$REPO_URL" -b "$REPO_BRANCH" --single-branch --depth=1 openwrt
+          ln -sf "$BUILD_ROOT/openwrt" "$GITHUB_WORKSPACE/openwrt"
+
+          echo "FW_AUTHOR=${FW_AUTHOR:-qwe}" >> "$GITHUB_ENV"
+          echo "OPT_CRYPTO_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
+          echo "OPT_CRYPTO_CHACHA=${OPT_CRYPTO_CHACHA}" >> "$GITHUB_ENV"
+          echo "OPT_CRYPTO_EIP93=${OPT_CRYPTO_EIP93}" >> "$GITHUB_ENV"
+
+          cd openwrt && echo "commit: $(git rev-parse --short HEAD)"
+          mkdir -p .ccache
+
+      - name: Compute cache key
+        id: cache-key
+        run: |
+          S="$GITHUB_WORKSPACE/scripts/pwrt-cache.sh"
+          [ -f "$S" ] || { echo "::error::缺 $S"; exit 1; }
+          dos2unix "$S" 2>/dev/null || true
+          chmod +x "$S"
+          bash "$S" key "$CACHE_ROOT"
+          echo "SOURCE_SLUG=$(printf '%s' "${SOURCE:-unknown}" | tr -c 'A-Za-z0-9._-' '-')" >> "$GITHUB_ENV"
+
+      - name: Restore build cache
+        id: cache-restore
+        if: env.IGNORE_CACHE != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: ${{ steps.cache-key.outputs.prefix }}-
+          path: |
+            ${{ env.CACHE_ROOT }}/.ccache
+            ${{ env.CACHE_ROOT }}/staging_dir/host*
+            ${{ env.CACHE_ROOT }}/staging_dir/tool*
+
+      - name: Restore cache from Release backup
+        id: release-restore
+        if: >-
+          env.IGNORE_CACHE != 'true'
+          && env.RELEASE_BACKUP == 'true'
+          && steps.cache-restore.outputs.cache-matched-key == ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$CACHE_ROOT"
+          PREFIX="${{ steps.cache-key.outputs.prefix }}"
+          if ! gh release view "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          ASSET=$(gh release view "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" \
+                    --json assets -q '.assets[] | "\(.createdAt) \(.name)"' 2>/dev/null \
+                  | grep " ${PREFIX}-" | sort -r | head -1 | awk '{print $2}')
+          if [ -z "$ASSET" ]; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          which unzstd >/dev/null 2>&1 || sudo -E apt-get -yqq install zstd >/dev/null 2>&1 || true
+          if ! gh release download "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" -p "$ASSET" -D .; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if bash "$GITHUB_WORKSPACE/scripts/pwrt-cache.sh" unpack "$CACHE_ROOT" "./$ASSET"; then
+            rm -f "./$ASSET"
+            echo "restored=true" >> "$GITHUB_OUTPUT"
+            echo "restored_key=${ASSET%.tzst}" >> "$GITHUB_OUTPUT"
+          else
+            rm -f "./$ASSET"
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare restored build cache
+        if: >-
+          env.IGNORE_CACHE != 'true'
+          && (steps.cache-restore.outputs.cache-matched-key != ''
+              || steps.release-restore.outputs.restored == 'true')
+        env:
+          RESTORED_FROM: ${{ steps.cache-restore.outputs.cache-matched-key || format('Release:{0}', steps.release-restore.outputs.restored_key) }}
+          CACHE_EXACT: ${{ (steps.cache-restore.outputs.cache-hit == 'true' || (steps.release-restore.outputs.restored_key != '' && steps.release-restore.outputs.restored_key == steps.cache-key.outputs.key)) && 'true' || 'false' }}
+        run: |
+          cd "$CACHE_ROOT"
+          bash "$GITHUB_WORKSPACE/scripts/pwrt-cache.sh" prepare "$CACHE_ROOT"
+
+      - name: Probe FTTR repos visibility
+        id: probe
+        if: ${{ env.PRIVATE_REPO != 'none' && (env.PROFILE == 'h3c_hm2004-du' || github.event.inputs.profile == 'h3c_hm2004-du') }}
+        run: |
+          NEED=false
+          probe() {
+            local repo="$1" br="$2"
+            if git ls-remote --exit-code --heads "https://github.com/${repo}" \
+                 "refs/heads/${br}" >/dev/null 2>&1; then
+              echo "public"
+            else
+              echo "private"
+            fi
+          }
+          R1=$(probe "${PRIVATE_REPO}" "${PRIVATE_REPO_BRANCH}")
+          R2=$(probe "${FTTR_LUCI_REPO}" "${FTTR_LUCI_BRANCH}")
+          if [ "$R1" = "private" ] || [ "$R2" = "private" ]; then NEED=true; fi
+          echo "need_token=$NEED" >> "$GITHUB_OUTPUT"
+          echo "backend=$R1" >> "$GITHUB_OUTPUT"
+          echo "luci=$R2" >> "$GITHUB_OUTPUT"
+          TOKEN_REPOS=""
+          add_repo() {
+            [ "$1" = "private" ] || return 0
+            local name="${2#*/}"
+            if [ -z "$TOKEN_REPOS" ]; then TOKEN_REPOS="$name"; else TOKEN_REPOS="$TOKEN_REPOS,$name"; fi
+          }
+          add_repo "$R1" "${PRIVATE_REPO}"
+          add_repo "$R2" "${FTTR_LUCI_REPO}"
+          echo "token_repos=$TOKEN_REPOS" >> "$GITHUB_OUTPUT"
+          if [ "$NEED" = true ] && [ "${HAS_APP_CREDS}" != "true" ] && [ "${HAS_PAT}" != "true" ]; then
+            echo "::error::仓库需要凭证但两种凭证都没配"
+          fi
+
+      - name: Create private source token
+        id: private-source-token
+        if: ${{ steps.probe.outputs.need_token == 'true' && env.HAS_APP_CREDS == 'true' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.PRIVATE_SOURCE_APP_ID }}
+          client-id: ${{ secrets.PRIVATE_SOURCE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PRIVATE_SOURCE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+          repositories: ${{ steps.probe.outputs.token_repos }}
+
+      - name: Prepare private Git authentication
+        if: ${{ steps.probe.outputs.need_token == 'true' && (env.HAS_APP_CREDS == 'true' || env.HAS_PAT == 'true') }}
+        run: |
+          install -m 700 "$GITHUB_WORKSPACE/scripts/git_askpass.sh" "$RUNNER_TEMP/git-askpass"
+          echo "GIT_ASKPASS=$RUNNER_TEMP/git-askpass" >> "$GITHUB_ENV"
+          echo "GIT_TERMINAL_PROMPT=0" >> "$GITHUB_ENV"
+
+      - name: Setup private repo credentials
+        id: private_repo
+        env:
+          APP_TOKEN: ${{ steps.private-source-token.outputs.token }}
+          SEC_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SEC_TOKEN_LEGACY: ${{ secrets.FTTR_TOKEN }}
+        run: |
+          if [ "${PRIVATE_REPO}" = "none" ]; then
+            echo "ADD_FTTR=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ "${PROFILE}" != "h3c_hm2004-du" ]; then exit 0; fi
+          if [ "${{ steps.probe.outputs.need_token }}" != "true" ]; then exit 0; fi
+          sanitize() { sed -E 's#://[^@/]+@#://***@#g'; }
+          if [ -n "${APP_TOKEN}" ]; then
+            TOKEN="${APP_TOKEN}"; SRC="App Token"
+          elif [ -n "${SEC_TOKEN}" ]; then
+            TOKEN="${SEC_TOKEN}"; SRC="PRIVATE_REPO_TOKEN"
+          elif [ -n "${SEC_TOKEN_LEGACY}" ]; then
+            TOKEN="${SEC_TOKEN_LEGACY}"; SRC="FTTR_TOKEN"
+          else
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          TOKEN_FILE="$RUNNER_TEMP/gh_token"
+          printf '%s' "$TOKEN" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+          export GH_TOKEN_FILE="$TOKEN_FILE"
+          export GIT_ASKPASS="${GIT_ASKPASS:-$RUNNER_TEMP/git-askpass}"
+          echo "GH_TOKEN_FILE=$TOKEN_FILE" >> "$GITHUB_ENV"
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --local  --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+      - name: Restore dl cache
+        id: dl-restore
+        if: env.USE_DL_CACHE == 'true'
+        uses: actions/cache/restore@v5
+        continue-on-error: true
+        with:
+          path: /workdir/openwrt/dl
+          key: ponwrt-dl-${{ env.SOURCE_SLUG }}-${{ github.event.inputs.branch || 'master' }}-${{ steps.resolve.outputs.week }}
+          restore-keys: |
+            ponwrt-dl-${{ env.SOURCE_SLUG }}-${{ github.event.inputs.branch || 'master' }}-
+            ponwrt-dl-${{ env.SOURCE }}-${{ github.event.inputs.branch || 'master' }}-
+
+      - name: Update & install feeds
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          if [ -n "${FEEDS_CONF}" ] && [ -e "$GITHUB_WORKSPACE/${FEEDS_CONF}" ]; then
+            cp "$GITHUB_WORKSPACE/${FEEDS_CONF}" feeds.conf.default
+          fi
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Pull optional plugins (diy-part1.sh)
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P1_SH"
+          "$GITHUB_WORKSPACE/$DIY_P1_SH"
+
+      - name: Relax cargo offline flags
+        continue-on-error: true
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          S="$GITHUB_WORKSPACE/scripts/patch-cargo-offline.sh"
+          [ -f "$S" ] || { echo "::warning::缺 $S，跳过"; exit 0; }
+          dos2unix "$S" 2>/dev/null || true
+          bash "$S" "$BUILD_ROOT/openwrt"
+
+      - name: Load custom configuration
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          [ -e "$GITHUB_WORKSPACE/files" ] && cp -r "$GITHUB_WORKSPACE/files" files
+          [ -d files/sbin ] && chmod +x files/sbin/* 2>/dev/null
+          [ -d files/etc/uci-defaults ] && chmod +x files/etc/uci-defaults/* 2>/dev/null
+
+          clean_cfg() { sed -E '/^[[:space:]]*#/! s/[[:space:]]+#.*$//' "$1"; }
+          EXP="$GITHUB_WORKSPACE/.ci-explicit.config"
+          if [ -e "$GITHUB_WORKSPACE/${CONFIG_FILE}" ]; then
+            clean_cfg "$GITHUB_WORKSPACE/${CONFIG_FILE}" > "$EXP"
+            cat "$EXP" >> .config
+          elif [ -e "$GITHUB_WORKSPACE/configs/${SOC}.config" ]; then
+            clean_cfg "$GITHUB_WORKSPACE/configs/${SOC}.config" > "$EXP"
+            cat "$EXP" >> .config
+          else
+            echo "::error::找不到机型配置 ${CONFIG_FILE}"
+            exit 1
+          fi
+
+      - name: Apply device profile
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          if [ "${PROFILE}" = "all" ]; then
+            echo "全机型编译，不做裁剪"
+          else
+            sed -i '/CONFIG_TARGET_DEVICE_/d; /^CONFIG_TARGET_MULTI_PROFILE=/d' .config
+            {
+              echo "CONFIG_TARGET_MULTI_PROFILE=y"
+              echo "CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y"
+              echo "CONFIG_TARGET_DEVICE_PACKAGES_airoha_${SOC}_DEVICE_${PROFILE}=\"\""
+            } >> .config
+          fi
+
+      # --- 新增：执行 diy-part3.sh ---
+      - name: Apply customizations (diy-part3.sh)
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          chmod +x "$GITHUB_WORKSPACE/diy-part3.sh"
+          INSTALL_PLUGINS="$INSTALL_PLUGINS" \
+          INSTALL_CARBON="$INSTALL_CARBON" \
+          DOCKER_KERNEL_ENABLED="$DOCKER_KERNEL_ENABLED" \
+          DOCKER_APPS_ENABLED="$DOCKER_APPS_ENABLED" \
+            "$GITHUB_WORKSPACE/diy-part3.sh"
+
+      - name: Set timezone to China (diy-part2.sh)
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          chmod +x "$GITHUB_WORKSPACE/$DIY_P2_SH"
+          FW_AUTHOR="$FW_AUTHOR" FW_BUILD_TIME="$FW_BUILD_TIME" FW_DESC_SUFFIX="$FW_DESC_SUFFIX" \
+          WIFI_5G_COUNTRY="$WIFI_5G_COUNTRY" WIFI_5G_CHANNEL="$WIFI_5G_CHANNEL" \
+          WIFI_5G_HTMODE="$WIFI_5G_HTMODE" WIFI_5G_FALLBACK="$WIFI_5G_FALLBACK" \
+            "$GITHUB_WORKSPACE/$DIY_P2_SH"
+
+          echo "WANT_ARM64CE=${OPT_CRYPTO_ARM64CE}" >> "$GITHUB_ENV"
+          echo "WANT_CHACHA=${OPT_CRYPTO_CHACHA}"   >> "$GITHUB_ENV"
+          echo "WANT_EIP93=${OPT_CRYPTO_EIP93}"     >> "$GITHUB_ENV"
+
+      - name: Prepare host toolchain (Go / BPF / Python)
+        if: env.PREBUILT_HOST == 'true'
+        continue-on-error: true
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          S="$GITHUB_WORKSPACE/scripts/prepare-build-host.sh"
+          [ -f "$S" ] || { echo "::warning::缺 $S，跳过 host 加速"; exit 0; }
+          dos2unix "$S" 2>/dev/null || true
+          bash "$S" "$BUILD_ROOT/openwrt"
+
+      - name: Prepare Rust toolchain (prebuilt)
+        if: env.PREBUILT_HOST == 'true'
+        continue-on-error: true
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          S="$GITHUB_WORKSPACE/scripts/prepare-rust.sh"
+          [ -f "$S" ] || { echo "::warning::缺 $S，跳过 rust 预编译"; exit 0; }
+          dos2unix "$S" 2>/dev/null || true
+          bash "$S" "$BUILD_ROOT/openwrt"
+
+      - name: Validate configuration
+        id: validate
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          S="$GITHUB_WORKSPACE/scripts/defconfig.sh"
+          [ -f "$S" ] || { echo "::error::缺 $S"; exit 1; }
+          dos2unix "$S" 2>/dev/null || true
+          bash "$S" "$PWD"
+
+          if [ "${WIFI7_VENDOR}" = "true" ] && [ -f "$GITHUB_WORKSPACE/.ci-explicit.config" ]; then
+            RESTORED=""
+            while IFS= read -r _line; do
+              case "$_line" in
+                CONFIG_PACKAGE_*=y|CONFIG_MTK_*=y|CONFIG_DRIVER_11*=y|CONFIG_first_card*=y) ;;
+                *) continue ;;
+              esac
+              _sym="${_line%%=*}"
+              if grep -qx "# ${_sym} is not set" .config; then
+                sed -i "s|^# ${_sym} is not set|${_sym}=y|" .config
+                RESTORED="$RESTORED ${_sym}"
+              fi
+            done < "$GITHUB_WORKSPACE/.ci-explicit.config"
+            if [ -n "$RESTORED" ]; then
+              echo "::warning::defconfig 降级了机型配置里显式 =y 的包，已写回:$RESTORED"
+            fi
+          fi
+
+          MISSING=""
+          for p in kmod-airoha-xpon kmod-airoha-pon-frontend airoha-pond airoha-ponctl luci-app-pon; do
+            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              MISSING="$MISSING $p"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::以下关键包在 defconfig 后未启用，检查 feeds 是否完整:$MISSING"
+            exit 1
+          fi
+
+          OPT_MISS=""
+          for p in luci-app-airoha-npu luci-app-pon-status luci-app-natmode luci-app-igmpproxy; do
+            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              OPT_MISS="$OPT_MISS $p"
+            fi
+          done
+          if [ -n "$OPT_MISS" ]; then
+            echo "::error::状态插件缺失:$OPT_MISS 请检查 diy-part1.sh 的 clone / 拷贝是否成功"
+            exit 1
+          fi
+
+          if [ "$PROFILE" = "fiberhome_an4475-g2" ]; then
+            if ! grep -q "^CONFIG_PACKAGE_luci-app-ledpanel=y" .config; then
+              echo "::error::luci-app-ledpanel 未启用"
+              exit 1
+            fi
+          fi
+
+          if [ "$PROFILE" != "all" ]; then
+            TI=tmp/.targetinfo
+            if [ ! -f "$TI" ]; then
+              echo "::error::缺 $TI —— defconfig 没跑成功，后续校验不可信"
+              exit 1
+            fi
+            DEVPKGS=$(awk -v p="DEVICE_${PROFILE}" '
+              $0 == "Target-Profile: " p { f = 1; next }
+              f && /^Target-Profile:/ { f = 0 }
+              f && /^Target-Profile-Packages:/ { sub(/^Target-Profile-Packages:[ \t]*/, ""); print; exit }
+            ' "$TI")
+            if [ -n "$DEVPKGS" ]; then
+              MISS_DEV=""
+              for p in $DEVPKGS; do
+                case "$p" in -*) continue ;; esac
+                p=${p%%:*}
+                if ! grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
+                  MISS_DEV="$MISS_DEV $p"
+                fi
+              done
+              if [ -n "$MISS_DEV" ]; then
+                echo "::error::机型 ${PROFILE} 的 DEVICE_PACKAGES 有包没被选中:$MISS_DEV"
+                exit 1
+              fi
+            fi
+          fi
+
+          if [ "${WIFI7_VENDOR}" = "true" ]; then
+            W7_MISS=""
+            for sym in \
+              CONFIG_PACKAGE_kmod-mt_wifi7=y CONFIG_PACKAGE_kmod-mt_wifi_osal=y CONFIG_PACKAGE_kmod-mt_hwifi=y \
+              CONFIG_PACKAGE_kmod-mtk_pci=y CONFIG_PACKAGE_kmod-connac_if=y CONFIG_PACKAGE_kmod-mt7993=y \
+              CONFIG_PACKAGE_kmod-mt799b=y CONFIG_PACKAGE_wifi-profile=y CONFIG_PACKAGE_mtwifi-cfg-ucode=y \
+              CONFIG_PACKAGE_iwinfo-ucode=y CONFIG_PACKAGE_mwctl=y CONFIG_PACKAGE_airoha-en7581-mt7996-npu-firmware=y \
+              CONFIG_MTK_HWIFI_MT7993=y CONFIG_MTK_HWIFI_MT799B=y CONFIG_MTK_WIFI7_MT_WIFI=y \
+              CONFIG_MTK_WIFI7_MT_AP_SUPPORT=y CONFIG_MTK_WIFI7_CHIP_MT7993=y CONFIG_MTK_WIFI7_OSAL_SUPPORT=y \
+              CONFIG_MTK_WIFI7_CFG80211_SUPPORT=y CONFIG_MTK_WIFI7_MAP_SUPPORT=y CONFIG_MTK_WIFI7_DOT11K_RRM_SUPPORT=y \
+              CONFIG_MTK_WIFI7_DOT11R_FT_SUPPORT=y CONFIG_DRIVER_11BE_SUPPORT=y CONFIG_DRIVER_11AX_SUPPORT=y \
+              CONFIG_DRIVER_11AC_SUPPORT=y ; do
+              grep -q "^${sym}" .config || W7_MISS="$W7_MISS ${sym%%=*}"
+            done
+            grep -q '^CONFIG_first_card_name="MT7993"' .config || W7_MISS="$W7_MISS CONFIG_first_card_name"
+            grep -q '^CONFIG_first_card_EEPROM_size="0x14a800"' .config || W7_MISS="$W7_MISS CONFIG_first_card_EEPROM_size"
+            grep -q '^CONFIG_first_card_EEPROM_name="e2p"' .config || W7_MISS="$W7_MISS CONFIG_first_card_EEPROM_name"
+            if [ -n "$W7_MISS" ]; then
+              echo "::error::vendor Wi-Fi 7 关键符号在 defconfig 后缺失:$W7_MISS"
+              exit 1
+            fi
+
+            W7_CONFLICT=""
+            for p in kmod-mt76-core kmod-mt76-connac kmod-mt7996e kmod-mt7990-firmware kmod-mac80211; do
+              if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+                W7_CONFLICT="$W7_CONFLICT $p"
+              fi
+            done
+            if [ -n "$W7_CONFLICT" ]; then
+              echo "::error::vendor Wi-Fi 7 模式下仍启用 mt76/mac80211 包:$W7_CONFLICT"
+              exit 1
+            fi
+
+            if grep -q "^CONFIG_PACKAGE_iwinfo=y" .config; then
+              echo "::error::CONFIG_PACKAGE_iwinfo=y 与 iwinfo-ucode 互斥"
+              exit 1
+            fi
+            if grep -q "^CONFIG_WIFI_SCRIPT_SUPPORT=y" .config; then
+              echo "::error::CONFIG_WIFI_SCRIPT_SUPPORT=y 会让 wifi-profile 抢 /sbin/wifi"
+              exit 1
+            fi
+
+            DTS="target/linux/airoha/dts/an7581-fiberhome-an4475-g2.dts"
+            if [ -f "$DTS" ]; then
+              python3 "$GITHUB_WORKSPACE/scripts/check-dts-refs.py" "$DTS" || exit 1
+            fi
+          fi
+
+          if [ "${PROFILE}" != "all" ]; then
+            if ! grep -q "^CONFIG_TARGET_DEVICE_airoha_${SOC}_DEVICE_${PROFILE}=y" .config; then
+              echo "::error::机型 ${PROFILE} 在 ${SOC} 下不存在"
+              exit 1
+            fi
+          fi
+
+      - name: Download toolchain sources
+        if: >-
+          env.IGNORE_CACHE == 'true'
+          || (steps.cache-restore.outputs.cache-matched-key == ''
+              && steps.release-restore.outputs.restored != 'true')
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          for i in 1 2 3; do
+            if make tools/download toolchain/download -j8; then break; fi
+            sleep 5
+          done
+          find dl -size -1024c -type f -exec rm -f {} \; 2>/dev/null
+          MISS=""
+          for pat in "musl-*.tar.gz" "gcc-*" "binutils-*"; do
+            if ! ls dl/$pat >/dev/null 2>&1; then MISS="$MISS $pat"; fi
+          done
+          if [ -n "$MISS" ]; then
+            echo "::error::工具链源码缺失:$MISS"
+            exit 1
+          fi
+
+      - name: Build tools & toolchain
+        id: toolchain
+        if: >-
+          env.IGNORE_CACHE == 'true'
+          || (steps.cache-restore.outputs.cache-matched-key == ''
+              && steps.release-restore.outputs.restored != 'true')
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          make tools/install -j"$(nproc)" || make tools/install -j1 V=s || exit 1
+          make toolchain/install -j"$(nproc)" || make toolchain/install -j1 V=s || exit 1
+          mkdir -p tmp && echo 1 > tmp/.build
+
+      - name: Build host go/rust from source
+        id: host-src
+        if: >-
+          env.PREBUILT_HOST != 'true'
+          && (env.IGNORE_CACHE == 'true'
+              || (steps.cache-restore.outputs.cache-matched-key == ''
+                  && steps.release-restore.outputs.restored != 'true'))
+        timeout-minutes: 200
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          JOBS=$(nproc)
+          for p in golang-bootstrap golang rust; do
+            rel=$(find -L package -maxdepth 4 -type d -name "$p" 2>/dev/null | head -1)
+            [ -z "$rel" ] && continue
+            make "$rel/download" >/dev/null 2>&1 || true
+            make "$rel/host/compile" -j"$JOBS" || make "$rel/host/compile" -j1 V=s || true
+          done
+          bash "$GITHUB_WORKSPACE/scripts/pwrt-cache.sh" freeze "$CACHE_ROOT" || true
+
+      - name: Save build cache (right after toolchain)
+        id: save-early
+        if: >-
+          (!cancelled())
+          && steps.toolchain.outcome == 'success'
+          && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        continue-on-error: true
+        with:
+          key: ${{ steps.cache-key.outputs.key }}-early
+          path: |
+            ${{ env.CACHE_ROOT }}/.ccache
+            ${{ env.CACHE_ROOT }}/staging_dir/host*
+            ${{ env.CACHE_ROOT }}/staging_dir/tool*
+
+      - name: Cache decision
+        run: |
+          HIT='${{ steps.cache-restore.outputs.cache-hit }}'
+          MATCHED='${{ steps.cache-restore.outputs.cache-matched-key }}'
+          REL='${{ steps.release-restore.outputs.restored }}'
+          RELKEY='${{ steps.release-restore.outputs.restored_key }}'
+          KEY='${{ steps.cache-key.outputs.key }}'
+          if [ "${IGNORE_CACHE}" = "true" ]; then
+            DECISION="ignore_cache=true，按要求跳过恢复、强制重编"
+          elif [ -n "$MATCHED" ] && [ "$HIT" = "true" ]; then
+            DECISION="actions/cache 精确命中，工具链一步没编"
+          elif [ -n "$MATCHED" ]; then
+            DECISION="actions/cache 前缀回退命中上一代，工具链没编；本次存新一代"
+          elif [ "$REL" = "true" ] && [ "$RELKEY" = "$KEY" ]; then
+            DECISION="从 Release 备份恢复，且就是当前提交那一份"
+          elif [ "$REL" = "true" ]; then
+            DECISION="从 Release 备份恢复的是旧代，工具链需补编；本次回填快通道"
+          else
+            DECISION="两条通道都没有，冷编译"
+          fi
+          echo "决定：${DECISION}"
+
+      - name: Setup ccache (opt-in)
+        if: env.USE_CCACHE == 'true'
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          sed -i '/^CONFIG_CCACHE=/d; /^# CONFIG_CCACHE is not set/d' .config
+          echo 'CONFIG_CCACHE=y' >> .config
+          if [ ! -x staging_dir/host/bin/ccache ]; then
+            make tools/ccache/install -j"$(nproc)" || sed -i 's/^CONFIG_CCACHE=y/# CONFIG_CCACHE is not set/' .config
+          fi
+
+      - name: SSH connection to Actions
+        uses: mxschmitt/action-tmate@v3
+        if: >-
+          github.event.inputs.ssh == 'true'
+          && github.actor == github.repository_owner
+
+      - name: Download packages
+        id: package
+        if: env.BUILD_SCOPE != 'toolchain-only'
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          OK=0
+          for i in 1 2 3; do
+            if make download -j8; then OK=1; break; fi
+            sleep 5
+          done
+          find dl -size -1024c -type f -exec rm -f {} \; 2>/dev/null
+          if [ "$OK" -ne 1 ]; then
+            echo "::error::make download 连试 3 次仍失败"
+            exit 1
+          fi
+
+      - name: Save dl cache
+        if: >-
+          success()
+          && env.USE_DL_CACHE == 'true'
+          && steps.dl-restore.outputs.cache-hit != 'true'
+          && steps.package.outcome == 'success'
+        uses: actions/cache/save@v5
+        continue-on-error: true
+        with:
+          key: ponwrt-dl-${{ env.SOURCE_SLUG }}-${{ github.event.inputs.branch || 'master' }}-${{ steps.resolve.outputs.week }}
+          path: /workdir/openwrt/dl
+
+      - name: Compile the firmware
+        id: compile
+        if: env.BUILD_SCOPE != 'toolchain-only'
+        run: |
+          cd "$BUILD_ROOT/openwrt"
+          JOBS=$(awk -v p="$(nproc)" '/^MemAvailable:/{m=int($2/2097152)+1} END{print m<p?m:p}' /proc/meminfo)
+          JOBS=$(( JOBS < 1 ? 1 : JOBS ))
+          LOGDIR="$GITHUB_WORKSPACE/build-logs"
+          mkdir -p "$LOGDIR"
+          : > "$LOGDIR/build.log"
+          set -o pipefail
+          try_build() {
+            local tag="$1"; shift
+            make "$@" 2>&1 | tee -a "$LOGDIR/build.log"
+            return ${PIPESTATUS[0]}
+          }
+          OK=0
+          if try_build "j${JOBS}" -j"${JOBS}"; then
+            OK=1
+          else
+            if try_build "j1" -j1; then OK=1; elif try_build "verbose" -j1 V=s; then OK=1; fi
+          fi
+          if [ "$OK" -ne 1 ]; then
+            exit 1
+          fi
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
+          bash "$GITHUB_WORKSPACE/scripts/pwrt-cache.sh" freeze "$CACHE_ROOT" || true
+
+      - name: Report build failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          LOG="$GITHUB_WORKSPACE/build-logs/build.log"
+          [ -f "$LOG" ] || exit 0
+          ERRS=$(grep -nE '(^|[[:space:]])(ERROR:|error:|\*\*\* .*Error [0-9]+|make(\[[0-9]+\])?: \*\*\*)|unable to select packages|no such package|Image too big' "$LOG" | tail -20 | tr -d '\r' || true)
+          while IFS= read -r l; do
+            [ -n "$l" ] && echo "::error::$(printf '%s' "$l" | sed 's/%/%25/g' | cut -c1-300)"
+          done <<< "$(tail -4 <<< "$ERRS")"
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        continue-on-error: true
+        with:
+          name: build-logs-${{ env.DEVICE_NAME }}-${{ github.run_id }}
+          path: ${{ github.workspace }}/build-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Save build cache
+        if: >-
+          success()
+          && steps.cache-restore.outputs.cache-hit != 'true'
+          && (steps.compile.outcome == 'success' || steps.toolchain.outcome == 'success')
+        uses: actions/cache/save@v5
+        continue-on-error: true
+        with:
+          key: ${{ steps.cache-key.outputs.key }}
+          path: |
+            ${{ env.CACHE_ROOT }}/.ccache
+            ${{ env.CACHE_ROOT }}/staging_dir/host*
+            ${{ env.CACHE_ROOT }}/staging_dir/tool*
+
+      - name: Save cache to Release backup
+        if: >-
+          env.RELEASE_BACKUP == 'true'
+          && success()
+          && steps.cache-restore.outputs.cache-hit != 'true'
+          && (steps.compile.outcome == 'success' || steps.toolchain.outcome == 'success')
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$CACHE_ROOT"
+          KEY="${{ steps.cache-key.outputs.key }}"
+          PREFIX="${{ steps.cache-key.outputs.prefix }}"
+          TARBALL="${KEY}.tzst"
+          which zstd >/dev/null 2>&1 || sudo -E apt-get -yqq install zstd >/dev/null 2>&1 || true
+          if ! bash "$GITHUB_WORKSPACE/scripts/pwrt-cache.sh" pack "$CACHE_ROOT" "$CACHE_ROOT/$TARBALL"; then exit 0; fi
+          SZ=$(stat -c%s "$TARBALL")
+          if [ "$SZ" -gt 2000000000 ]; then rm -f "$TARBALL"; exit 0; fi
+          if ! gh release view "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$CACHE_RELEASE" --repo "$GITHUB_REPOSITORY" --title "Build Cache Backup" --notes "Build cache" --latest=false || true
+          fi
+          gh release upload "$CACHE_RELEASE" "$TARBALL" --repo "$GITHUB_REPOSITORY" --clobber
+          rm -f "$TARBALL"
+
+      - name: Check space usage
+        if: (!cancelled())
+        run: df -hT
+
+      - name: Upload bin directory
+        uses: actions/upload-artifact@v5
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        with:
+          name: OpenWrt_bin_${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.BUILD_ROOT }}/openwrt/bin
+
+      - name: Organize files
+        id: organize
+        if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success'
+        run: |
+          cd "$BUILD_ROOT"/openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware directory
+        uses: actions/upload-artifact@v5
+        if: steps.organize.outputs.status == 'success'
+        with:
+          name: OpenWrt_firmware_${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: Generate release tag
+        id: tag
+        if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+        run: |
+          if [ -z "$FIRMWARE" ] || [ -z "$(ls -A "$FIRMWARE" 2>/dev/null)" ]; then exit 0; fi
+          RELEASE_TAG=$(echo "${DEVICE_NAME}-${REPO_BRANCH}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          touch release.txt
+          BUILD_TIME="$(date '+%Y-%m-%d %H:%M:%S') (Shanghai)"
+          {
+            echo "## PonWrt 自动编译固件"
+            echo "| 项目 | 详情 |"
+            echo "|------|------|"
+            echo "| 机型 | \`${PROFILE}\` |"
+            echo "| SoC | \`${SOC}\` |"
+            echo "| 作者 | \`${FW_AUTHOR}\` |"
+            echo "| 源码 | ${REPO_URL} |"
+            echo "| 分支 | \`${REPO_BRANCH}\` |"
+            echo "| 提交 | \`$(cd "$BUILD_ROOT"/openwrt && git rev-parse --short HEAD)\` |"
+            echo "| 编译时间 | ${BUILD_TIME} |"
+            echo "| 加密加速 | ARM64CE=${OPT_CRYPTO_ARM64CE} / ChaCha=${OPT_CRYPTO_CHACHA} / EIP93=${OPT_CRYPTO_EIP93} |"
+          } >> release.txt
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v2
+        if: steps.tag.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          make_latest: true
+          fail_on_unmatched_files: false
+          files: |
+            ${{ env.FIRMWARE }}/*.bin
+            ${{ env.FIRMWARE }}/*.ubi
+            ${{ env.FIRMWARE }}/*.img
+            ${{ env.FIRMWARE }}/*.img.gz
+            ${{ env.FIRMWARE }}/*.itb
+            ${{ env.FIRMWARE }}/*.fit
+            ${{ env.FIRMWARE }}/*.trx
+            ${{ env.FIRMWARE }}/*.tar.gz
+            ${{ env.FIRMWARE }}/*.manifest
+            ${{ env.FIRMWARE }}/*.json
+
+      - name: Delete workflow runs
+        if: steps.compile.outputs.status == 'success'
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          retain_days: 7
+          keep_minimum_runs: 10
+
+      - name: Remove old releases
+        uses: dev-drprasad/delete-older-releases@v0.3.4
+        if: env.UPLOAD_RELEASE == 'true' && success()
+        with:
+          keep_latest: 10
+          delete_tags: true
+          delete_tag_pattern: '^${{ env.DEVICE_NAME }}-'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cache-rollover:
+    name: Roll build cache
+    needs: build
+    if: ${{ needs.build.result == 'success' && needs.build.outputs.cache_key != '' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ponwrt-cache-rollover-${{ github.ref }}-${{ needs.build.outputs.cache_prefix }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PREFIX: ${{ needs.build.outputs.cache_prefix }}
+      KEY: ${{ needs.build.outputs.cache_key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Roll cache generations
+        continue-on-error: true
+        run: |
+          S="$GITHUB_WORKSPACE/scripts/pwrt-cache.sh"
+          dos2unix "$S" 2>/dev/null || true
+          bash "$S" rollover
