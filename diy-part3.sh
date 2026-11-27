@@ -174,16 +174,4 @@ else
     echo "Docker 用户态软件未启用，跳过。"
 fi
 
-# ---------------------------------------------------------
-# 4.5 针对 h3c_hm2004-du 补齐基础依赖（修复 fitblk 缺失问题）
-# ---------------------------------------------------------
-if [ "${PROFILE:-}" = "h3c_hm2004-du" ]; then
-    echo "--- 针对 h3c_hm2004-du 补齐可能缺失的基础依赖 ---"
-    # 补全依赖，防止 fitblk 因为底层包没选上而被 defconfig 剔除
-    enable_pkg "libblkid"
-    enable_pkg "libubootenv"
-    enable_pkg "fitblk"
-    # 绝不要强行 enable_pkg "kmod-fiberhome-fsl"，否则会导致 defconfig 依赖树崩溃
-fi
-
 echo "🎉 diy-part3.sh 执行完毕"
