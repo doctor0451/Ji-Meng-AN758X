@@ -183,25 +183,7 @@ if [ "${PROFILE:-}" = "h3c_hm2004-du" ]; then
     enable_pkg "libblkid"
     enable_pkg "libubootenv"
     enable_pkg "fitblk"
-    # 尝试补全 diy-part1.sh 拉取的私有仓库依赖
-    enable_pkg "kmod-fiberhome-fsl" || true
-fi
-
-# ---------------------------------------------------------
-# 5. 包索引重建 + 校验
-# ---------------------------------------------------------
-if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
-  echo "--- 重建包索引（让 Carbon 等新克隆的包被 defconfig 识别）---"
-  rm -f tmp/.packageinfo tmp/.targetinfo
-  rm -f tmp/info/.scan-packageinfo.stamp tmp/info/.scan-targetinfo.stamp
-  rm -f tmp/info/.files* 2>/dev/null
-  find "$PKG_DIR" -type f -exec touch {} + 2>/dev/null || true
-
-  make prepare-tmpinfo OPENWRT_BUILD= V=s 2>&1 | tail -30
-  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    echo "::error::prepare-tmpinfo 失败"
-    exit 1
-  fi
+    # 绝不要强行 enable_pkg "kmod-fiberhome-fsl"，否则会导致 defconfig 依赖树崩溃
 fi
 
 echo "🎉 diy-part3.sh 执行完毕"
