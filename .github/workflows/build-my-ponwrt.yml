@@ -574,6 +574,7 @@ jobs:
           INSTALL_CARBON="$INSTALL_CARBON" \
           DOCKER_KERNEL_ENABLED="$DOCKER_KERNEL_ENABLED" \
           DOCKER_APPS_ENABLED="$DOCKER_APPS_ENABLED" \
+          PROFILE="$PROFILE" \
             "$GITHUB_WORKSPACE/diy-part3.sh"
 
       - name: Set timezone to China (diy-part2.sh)
@@ -617,6 +618,23 @@ jobs:
           [ -f "$S" ] || { echo "::error::缺 $S"; exit 1; }
           dos2unix "$S" 2>/dev/null || true
           bash "$S" "$PWD"
+
+          # --- 修复 h3c_hm2004-du 的 fitblk 被误杀问题 ---
+          if [ "$PROFILE" = "h3c_hm2004-du" ]; then
+            RESTORED=""
+            for sym in CONFIG_PACKAGE_fitblk CONFIG_PACKAGE_libubootenv CONFIG_PACKAGE_libblkid CONFIG_PACKAGE_kmod-dm; do
+              if grep -qx "# ${sym} is not set" .config; then
+                sed -i "s|^# ${sym} is not set|${sym}=y|" .config
+                RESTORED="$RESTORED ${sym}"
+              elif ! grep -q "^${sym}=y" .config; then
+                echo "${sym}=y" >> .config
+                RESTORED="$RESTORED ${sym}"
+              fi
+            done
+            if [ -n "$RESTORED" ]; then
+              echo "::warning::defconfig 剔除了 h3c_hm2004-du 的基础依赖，已强制写回:$RESTORED"
+            fi
+          fi
 
           if [ "${WIFI7_VENDOR}" = "true" ] && [ -f "$GITHUB_WORKSPACE/.ci-explicit.config" ]; then
             RESTORED=""
