@@ -52,12 +52,17 @@ enable_pkg() {
   echo "  ✅ ${pkg}=y"
 }
 
+# 把 CONFIG_<sym>=y 写入 .config（内核符号，去重：先删旧行）
+enable_kernel_sym() {
+  local sym="$1"
+  sed -i "/^CONFIG_${sym}=/d; /^# CONFIG_${sym} is not set/d" .config 2>/dev/null || true
+  echo "CONFIG_${sym}=y" >> .config
+  echo "  ✅ CONFIG_${sym}=y"
+}
+
 # ---------------------------------------------------------
 # 1. 解析 plugin.txt
 # ---------------------------------------------------------
-# 三类：luci插件（需要 LuCI 前端）/ 插件（纯二进制）/ 主题
-# '#' 开头为注释，跳过。
-# 非 luci 插件名 → 实际包名映射（feeds 里名字可能不同）
 declare -A BIN_MAP=(
   [usteer]="usteer"
   [btop]="btop"
@@ -66,8 +71,8 @@ declare -A BIN_MAP=(
 parse_and_enable() {
   local section="" raw line pkg
   while IFS= read -r raw; do
-    line="${raw%%#*}"                       # 去行内注释
-    line="$(printf '%s' "$line" | xargs)"   # trim
+    line="${raw%%#*}"
+    line="$(printf '%s' "$line" | xargs)"
     [ -z "$line" ] && continue
 
     case "$line" in
@@ -88,7 +93,7 @@ parse_and_enable() {
       theme)
         case "$line" in
           Argon)  enable_pkg "luci-theme-argon" ;;
-          Carbon) : ;;   # 第 2 节单独处理（需要 clone）
+          Carbon) : ;;
           *)      echo "::warning::未知主题: $line" ;;
         esac
         ;;
@@ -107,7 +112,6 @@ fi
 # ---------------------------------------------------------
 # 2. luci-theme-carbon（唯一需要 clone 的，根目录即包）
 # ---------------------------------------------------------
-# 默认分支为 main，显式指定，不依赖远程 HEAD 指向
 if [ "$INSTALL_CARBON" = "true" ]; then
   if ! clone https://github.com/mrjoechen/luci-theme-carbon "$PKG_DIR/luci-theme-carbon" main; then
     echo "::error::luci-theme-carbon 拉取失败"
@@ -126,10 +130,17 @@ fi
 # dockerd / containerd 的 DEPENDS 与 Config.in 会自动 select
 # 所需内核符号（KERNEL_CGROUP_* / kmod-veth / kmod-nf-nat 等），
 # 故只需打开 dockerd，内核支持随依赖带出，不必手改内核 config。
+# 但 kmod-dm 在 6.x 内核上硬依赖 kmod-dax 和 kmod-keys-encrypted，
+# 需在此显式启用，否则最终组装镜像时会因找不到这两个包而失败。
 if [ "$DOCKER_KERNEL" = "true" ]; then
   echo "--- Docker 内核支持（通过 dockerd 依赖带出）---"
   enable_pkg "dockerd"
   enable_pkg "containerd"
+  # 补全 kmod-dm 的硬依赖
+  enable_kernel_sym "DAX"
+  enable_kernel_sym "ENCRYPTED_KEYS"
+  enable_pkg "kmod-dax"
+  enable_pkg "kmod-keys-encrypted"
 fi
 
 # ---------------------------------------------------------
@@ -144,9 +155,6 @@ fi
 # ---------------------------------------------------------
 # 5. luci-app-traffic（流量统计，依赖 vnstat2）
 # ---------------------------------------------------------
-# 从官方仓库克隆，作为标准 package 编译。
-# 依赖：luci-base (通常已选) + vnstat2 (需手动启用)
-# 该包自带 uci-defaults，会自动处理 vnStat 数据库持久化和 MaxBandwidth 调整。
 if ! clone https://github.com/shb110119/luci-app-traffic "$PKG_DIR/luci-app-traffic" main; then
   echo "::error::luci-app-traffic 拉取失败"
   exit 1
@@ -160,7 +168,7 @@ enable_pkg "vnstat2"
 echo "✅ 已启用 luci-app-traffic 及其依赖 (vnstat2)"
 
 # ---------------------------------------------------------
-# 6. 包索引重建 + 校验（同 diy-part1.sh 的判据）
+# 6. 包索引重建 + 校验
 # ---------------------------------------------------------
 if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
   echo "--- 重建包索引 ---"
@@ -176,7 +184,6 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
     exit 1
   fi
 
-  # 硬校验：Carbon 必须进索引
   if [ "$INSTALL_CARBON" = "true" ] && \
      ! grep -qx "Package: luci-theme-carbon" tmp/.packageinfo 2>/dev/null; then
     echo "::error::luci-theme-carbon 未进 tmp/.packageinfo"
@@ -187,7 +194,6 @@ if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
     exit 1
   fi
 
-  # 硬校验：luci-app-traffic 必须进索引
   if ! grep -qx "Package: luci-app-traffic" tmp/.packageinfo 2>/dev/null; then
     echo "::error::luci-app-traffic 未进 tmp/.packageinfo"
     for f in logs/package/custom/luci-app-traffic/dump.txt \
