@@ -1,7 +1,14 @@
 #!/bin/bash
 # ================================================================
 # diy-part3.sh —— 补充插件 / 主题 / Docker 支持
-# 执行时机：Load custom configuration 和 Apply device profile 之后，defconfig 之前
+# 运行目录：ponwrt 源码根目录
+# 执行时机：diy-part1.sh 之后、diy-part2.sh 之前
+#
+# 开关（环境变量覆盖）：
+#   INSTALL_PLUGINS  : true  (plugin.txt 里的插件，默认装)
+#   INSTALL_CARBON   : true  (luci-theme-carbon，默认装)
+#   DOCKER_KERNEL    : true  (Docker 内核支持，通过 dockerd 包依赖带出，默认开)
+#   DOCKER_USERLAND  : false (docker-compose + luci-app-dockerman，默认关)
 # ================================================================
 set -euo pipefail
 
@@ -10,45 +17,20 @@ mkdir -p "$PKG_DIR"
 
 : "${INSTALL_PLUGINS:=true}"
 : "${INSTALL_CARBON:=true}"
-: "${DOCKER_KERNEL_ENABLED:=true}"
-: "${DOCKER_APPS_ENABLED:=false}"
+: "${DOCKER_KERNEL:=true}"
+: "${DOCKER_USERLAND:=false}"
 
-# 查找 plugin.txt
+# plugin.txt 定位：优先脚本同目录上一级，其次 GITHUB_WORKSPACE
 PLUGIN_FILE="$(dirname "$0")/../plugin.txt"
 [ -f "$PLUGIN_FILE" ] || PLUGIN_FILE="${GITHUB_WORKSPACE:-.}/plugin.txt"
-if [ ! -f "$PLUGIN_FILE" ]; then
-    echo "::warning::plugin.txt 不存在，跳过插件解析"
-fi
+[ -f "$PLUGIN_FILE" ] || { echo "::error::plugin.txt 不存在"; exit 1; }
 
 echo "=========================================="
 echo "diy-part3.sh 开始"
-echo "  插件=$INSTALL_PLUGINS  Carbon=$INSTALL_CARBON"
-echo "  Docker内核=$DOCKER_KERNEL_ENABLED  Docker用户态=$DOCKER_APPS_ENABLED"
+echo "  插件=$INSTALL_PLUGINS  Carbon=$INSTALL_CARBON  Docker内核=$DOCKER_KERNEL  Docker用户态=$DOCKER_USERLAND"
 echo "=========================================="
 
-# 确保 .config 存在
-[ -f .config ] || : > .config
-
-# ---------------------------------------------------------
-# 通用配置函数：修改或追加配置项（去重）
-# 用法：set_config CONFIG_KERNEL_CGROUPS y
-# ---------------------------------------------------------
-set_config() {
-  local sym="$1"
-  local val="$2"
-  # 删除旧值（无论是 =y 还是 # ... is not set）
-  sed -i "/^${sym}=/d; /^# ${sym} is not set/d" .config 2>/dev/null || true
-  # 追加新值
-  echo "${sym}=${val}" >> .config
-  echo "  ✅ ${sym}=${val}"
-}
-
-# 包装一层设置 Package 的函数
-enable_pkg() {
-  set_config "CONFIG_PACKAGE_$1" "y"
-}
-
-clone() {
+clone() {  # clone <url> <dir> [branch]
   local url="$1" dir="$2" br="${3:-}"
   [ -d "$dir" ] && { echo "已存在，跳过: $dir"; return 0; }
   echo "--- git clone $url -> $dir ---"
@@ -62,9 +44,25 @@ clone() {
   return 1
 }
 
+# 把 CONFIG_PACKAGE_<pkg>=y 写入 .config（去重：先删旧行）
+enable_pkg() {
+  local pkg="$1"
+  sed -i "/^CONFIG_PACKAGE_${pkg}=/d; /^# CONFIG_PACKAGE_${pkg} is not set/d" .config 2>/dev/null || true
+  echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+  echo "  ✅ ${pkg}=y"
+}
+
 # ---------------------------------------------------------
 # 1. 解析 plugin.txt
 # ---------------------------------------------------------
+# 三类：luci插件（需要 LuCI 前端）/ 插件（纯二进制）/ 主题
+# '#' 开头为注释，跳过。
+# 非 luci 插件名 → 实际包名映射（feeds 里名字可能不同）
+declare -A BIN_MAP=(
+  [usteer]="usteer"
+  [btop]="btop"
+)
+
 parse_and_enable() {
   local section="" raw line pkg
   while IFS= read -r raw; do
@@ -80,98 +78,128 @@ parse_and_enable() {
 
     case "$section" in
       luci)
-        pkg="luci-app-$line"
+        pkg="${BIN_MAP[$line]:-luci-app-$line}"
         enable_pkg "$pkg"
         ;;
       bin)
-        pkg="$line"
+        pkg="${BIN_MAP[$line]:-$line}"
         enable_pkg "$pkg"
         ;;
       theme)
         case "$line" in
           Argon)  enable_pkg "luci-theme-argon" ;;
-          Carbon) : ;;   # 第 2 节单独处理
+          Carbon) : ;;   # 第 2 节单独处理（需要 clone）
           *)      echo "::warning::未知主题: $line" ;;
         esac
+        ;;
+      *)
+        echo "::warning::未识别分类行: $line"
         ;;
     esac
   done < "$PLUGIN_FILE"
 }
 
-if [ "$INSTALL_PLUGINS" = "true" ] && [ -f "$PLUGIN_FILE" ]; then
+if [ "$INSTALL_PLUGINS" = "true" ]; then
   echo "--- 解析 plugin.txt ---"
   parse_and_enable
 fi
 
 # ---------------------------------------------------------
-# 2. luci-theme-carbon
+# 2. luci-theme-carbon（唯一需要 clone 的，根目录即包）
 # ---------------------------------------------------------
+# 默认分支为 main，显式指定，不依赖远程 HEAD 指向
 if [ "$INSTALL_CARBON" = "true" ]; then
   if ! clone https://github.com/mrjoechen/luci-theme-carbon "$PKG_DIR/luci-theme-carbon" main; then
     echo "::error::luci-theme-carbon 拉取失败"
     exit 1
   fi
   if [ ! -f "$PKG_DIR/luci-theme-carbon/Makefile" ]; then
-    echo "::error::$PKG_DIR/luci-theme-carbon/Makefile 不存在"
+    echo "::error::$PKG_DIR/luci-theme-carbon/Makefile 不存在，包无法被索引"
     exit 1
   fi
   enable_pkg "luci-theme-carbon"
 fi
 
 # ---------------------------------------------------------
-# 3. 启用 Docker 内核支持
+# 3. Docker 内核支持
 # ---------------------------------------------------------
-if [ "$DOCKER_KERNEL_ENABLED" = "true" ]; then
-    echo "Docker 内核支持已启用，开始配置..."
-    set_config CONFIG_KERNEL_CGROUPS           y
-    set_config CONFIG_KERNEL_NAMESPACES        y
-    set_config CONFIG_KERNEL_CGROUP_DEVICE     y
-    set_config CONFIG_KERNEL_MEMCG             y
-    set_config CONFIG_KERNEL_CGROUP_FREEZER    y
-    set_config CONFIG_KERNEL_CGROUP_PIDS       y
-    set_config CONFIG_KERNEL_VETH              y
-    set_config CONFIG_KERNEL_BRIDGE            y
-    set_config CONFIG_KERNEL_OVERLAY_FS        y
-    set_config CONFIG_KERNEL_IPVLAN            y
-
-    for kmod in \
-        kmod-veth \
-        kmod-ipt-nat \
-        kmod-ipt-nat6 \
-        kmod-ipt-physdev \
-        kmod-ipt-extra \
-        kmod-nf-ipvs \
-        kmod-br-netfilter \
-        kmod-nft-compat \
-        kmod-dm \
-        kmod-fs-ext4 \
-        kmod-fs-btrfs \
-        kmod-ipvlan \
-    ; do
-        enable_pkg "$kmod"
-    done
-    echo "Docker 内核支持配置完成。"
-else
-    echo "Docker 内核支持未启用，跳过。"
+# dockerd / containerd 的 DEPENDS 与 Config.in 会自动 select
+# 所需内核符号（KERNEL_CGROUP_* / kmod-veth / kmod-nf-nat 等），
+# 故只需打开 dockerd，内核支持随依赖带出，不必手改内核 config。
+if [ "$DOCKER_KERNEL" = "true" ]; then
+  echo "--- Docker 内核支持（通过 dockerd 依赖带出）---"
+  enable_pkg "dockerd"
+  enable_pkg "containerd"
 fi
 
 # ---------------------------------------------------------
-# 4. 启用 Docker 用户态软件（默认关闭）
+# 4. Docker 用户态（默认关闭）
 # ---------------------------------------------------------
-if [ "$DOCKER_APPS_ENABLED" = "true" ]; then
-    echo "Docker 用户态软件已启用，开始配置..."
-    for pkg in \
-        docker \
-        dockerd \
-        docker-compose \
-        luci-app-dockerman \
-        luci-i18n-dockerman-zh-cn \
-    ; do
-        enable_pkg "$pkg"
+if [ "$DOCKER_USERLAND" = "true" ]; then
+  echo "--- Docker 用户态 ---"
+  enable_pkg "docker-compose"
+  enable_pkg "luci-app-dockerman"
+fi
+
+# ---------------------------------------------------------
+# 5. luci-app-traffic（流量统计，依赖 vnstat2）
+# ---------------------------------------------------------
+# 从官方仓库克隆，作为标准 package 编译。
+# 依赖：luci-base (通常已选) + vnstat2 (需手动启用)
+# 该包自带 uci-defaults，会自动处理 vnStat 数据库持久化和 MaxBandwidth 调整。
+if ! clone https://github.com/shb110119/luci-app-traffic "$PKG_DIR/luci-app-traffic" main; then
+  echo "::error::luci-app-traffic 拉取失败"
+  exit 1
+fi
+if [ ! -f "$PKG_DIR/luci-app-traffic/Makefile" ]; then
+  echo "::error::$PKG_DIR/luci-app-traffic/Makefile 不存在，包无法被索引"
+  exit 1
+fi
+enable_pkg "luci-base"
+enable_pkg "vnstat2"
+echo "✅ 已启用 luci-app-traffic 及其依赖 (vnstat2)"
+
+# ---------------------------------------------------------
+# 6. 包索引重建 + 校验（同 diy-part1.sh 的判据）
+# ---------------------------------------------------------
+if [ -n "$(ls -A "$PKG_DIR" 2>/dev/null)" ]; then
+  echo "--- 重建包索引 ---"
+  rm -f tmp/.packageinfo tmp/.targetinfo
+  rm -f tmp/info/.scan-packageinfo.stamp tmp/info/.scan-targetinfo.stamp
+  rm -f tmp/info/.files* 2>/dev/null
+  find "$PKG_DIR" -type f -exec touch {} + 2>/dev/null || true
+
+  echo ">>> make prepare-tmpinfo"
+  make prepare-tmpinfo OPENWRT_BUILD= V=s 2>&1 | tail -30
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "::error::prepare-tmpinfo 失败"
+    exit 1
+  fi
+
+  # 硬校验：Carbon 必须进索引
+  if [ "$INSTALL_CARBON" = "true" ] && \
+     ! grep -qx "Package: luci-theme-carbon" tmp/.packageinfo 2>/dev/null; then
+    echo "::error::luci-theme-carbon 未进 tmp/.packageinfo"
+    for f in logs/package/custom/luci-theme-carbon/dump.txt \
+             logs/package/luci-theme-carbon/dump.txt; do
+      [ -f "$f" ] && { echo "===== $f ====="; tail -25 "$f"; }
     done
-    echo "Docker 用户态软件配置完成。"
+    exit 1
+  fi
+
+  # 硬校验：luci-app-traffic 必须进索引
+  if ! grep -qx "Package: luci-app-traffic" tmp/.packageinfo 2>/dev/null; then
+    echo "::error::luci-app-traffic 未进 tmp/.packageinfo"
+    for f in logs/package/custom/luci-app-traffic/dump.txt \
+             logs/package/luci-app-traffic/dump.txt; do
+      [ -f "$f" ] && { echo "===== $f ====="; tail -25 "$f"; }
+    done
+    exit 1
+  fi
+
+  echo "✅ 索引校验通过"
 else
-    echo "Docker 用户态软件未启用，跳过。"
+  echo "package/custom 为空，跳过索引重建"
 fi
 
 echo "🎉 diy-part3.sh 执行完毕"
